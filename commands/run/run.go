@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/VirusTotal/gyp"
 	yara "github.com/hillu/go-yara/v4"
 	"yaris/utils"
 )
@@ -73,8 +75,6 @@ func Run(args []string) {
 	}
 
 	opts := scanOpts{
-		excludeSet: excludeSet,
-		includeSet: includeSet,
 		showOffset: *showOffset,
 		showHex:    *showHex,
 		hexLen:     *hexLen,
@@ -96,12 +96,16 @@ func Run(args []string) {
 			if *verbose {
 				fmt.Printf("%s%s%s\n", utils.ColorCyan, f, utils.ColorReset)
 			}
-			compiled, err := compileFile(f)
+			compiled, err := compileFile(f, includeSet, excludeSet)
 			if err != nil {
 				if singleFile {
 					utils.Fatalf("failed to compile %s: %v", f, err)
 				}
 				utils.Errorf("failed to compile %s: %v", f, err)
+				continue
+			}
+			if compiled == nil {
+				// All rules in this file were filtered out by -i/-e; skip it.
 				continue
 			}
 			batch = append(batch, compiled)
@@ -148,8 +152,6 @@ func Run(args []string) {
 }
 
 type scanOpts struct {
-	excludeSet map[string]bool
-	includeSet map[string]bool
 	showOffset bool
 	showHex    bool
 	hexLen     int
@@ -163,13 +165,6 @@ func scanFile(rules *yara.Rules, path string, opts scanOpts) {
 	}
 
 	for _, match := range matches {
-		if opts.excludeSet != nil && hasAnyTag(match.Tags, opts.excludeSet) {
-			continue
-		}
-		if opts.includeSet != nil && !hasAnyTag(match.Tags, opts.includeSet) {
-			continue
-		}
-
 		fmt.Printf("%s%s%s:%s%s%s\n",
 			utils.ColorCyan, path, utils.ColorReset,
 			utils.ColorRed, match.Rule, utils.ColorReset,
@@ -206,25 +201,24 @@ func parseTagSet(csv string) map[string]bool {
 	return set
 }
 
-func hasAnyTag(tags []string, set map[string]bool) bool {
-	for _, t := range tags {
-		if set[t] {
-			return true
-		}
-	}
-	return false
-}
-
-// compileFile compiles a single .yar/.yara file into a ready-to-use Rules set.
-// Each file gets its own Compiler so that a parse error in one file cannot
-// poison compilation of any other file (go-yara's Compiler is permanently
-// unusable after the first parse error).
+// compileFile parses path, applies tag filters, and compiles the surviving
+// rules into a ready-to-use Rules set.
 //
-// Common external variables used by signature-base rulesets (filepath,
-// filename, …) are pre-declared as empty strings so that rules referencing
-// them compile without "undefined identifier" errors.  Rules that require
-// those variables to have a real value simply won't match during scanning.
-func compileFile(path string) (*yara.Rules, error) {
+// When includeSet or excludeSet are non-nil the file is first parsed with gyp
+// so that individual rules can be filtered by their tags before any C-side
+// compilation happens — avoiding wasted work on rules that would never match.
+// Rules with no tags are excluded when includeSet is active.
+//
+// Returns (nil, nil) when tag filtering leaves zero rules to compile.
+//
+// Each file gets its own Compiler so a parse error in one file cannot poison
+// compilation of any other (go-yara's Compiler is permanently unusable after
+// the first parse error).
+//
+// Common external variables used by signature-base rulesets are pre-declared
+// as empty strings so rules referencing them compile without "undefined
+// identifier" errors.
+func compileFile(path string, includeSet, excludeSet map[string]bool) (*yara.Rules, error) {
 	c, err := yara.NewCompiler()
 	if err != nil {
 		return nil, err
@@ -239,16 +233,61 @@ func compileFile(path string) (*yara.Rules, error) {
 	c.DefineVariable("filetype", "")
 	c.DefineVariable("owner", "")
 
-	fh, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer fh.Close()
+	if len(includeSet) > 0 || len(excludeSet) > 0 {
+		fh, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		ruleset, err := gyp.Parse(fh)
+		fh.Close()
+		if err != nil {
+			return nil, err
+		}
 
-	if err := c.AddFile(fh, ""); err != nil {
-		return nil, err
+		filtered := ruleset.Rules[:0]
+		for _, rule := range ruleset.Rules {
+			if len(excludeSet) > 0 && tagSetContainsAny(rule.Tags, excludeSet) {
+				continue
+			}
+			if len(includeSet) > 0 && !tagSetContainsAny(rule.Tags, includeSet) {
+				continue
+			}
+			filtered = append(filtered, rule)
+		}
+		ruleset.Rules = filtered
+
+		if len(ruleset.Rules) == 0 {
+			return nil, nil
+		}
+
+		var buf bytes.Buffer
+		if err := ruleset.WriteSource(&buf); err != nil {
+			return nil, err
+		}
+		if err := c.AddString(buf.String(), ""); err != nil {
+			return nil, err
+		}
+	} else {
+		fh, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer fh.Close()
+		if err := c.AddFile(fh, ""); err != nil {
+			return nil, err
+		}
 	}
+
 	return c.GetRules()
+}
+
+func tagSetContainsAny(tags []string, set map[string]bool) bool {
+	for _, t := range tags {
+		if set[t] {
+			return true
+		}
+	}
+	return false
 }
 
 func readBytes(path string, offset int64, length int) ([]byte, error) {
