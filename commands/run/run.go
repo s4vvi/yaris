@@ -93,9 +93,6 @@ func Run(args []string) {
 
 		var batch []*yara.Rules
 		for _, f := range yaraFiles[batchStart:batchEnd] {
-			if *verbose {
-				fmt.Printf("%s%s%s\n", utils.ColorCyan, f, utils.ColorReset)
-			}
 			compiled, err := compileFile(f, includeSet, excludeSet)
 			if err != nil {
 				if singleFile {
@@ -107,6 +104,9 @@ func Run(args []string) {
 			if compiled == nil {
 				// All rules in this file were filtered out by -i/-e; skip it.
 				continue
+			}
+			if *verbose {
+				fmt.Printf("%s%s%s\n", utils.ColorCyan, f, utils.ColorReset)
 			}
 			batch = append(batch, compiled)
 		}
