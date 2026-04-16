@@ -58,14 +58,15 @@ func Run(args []string) {
 	}
 
 	writtenImports := map[string]bool{}
+	writtenRules := map[string]bool{}
 	for _, file := range yaraFiles {
-		if err := exportFromFile(file, filterTags, writtenImports, out); err != nil {
+		if err := exportFromFile(file, filterTags, writtenImports, writtenRules, out); err != nil {
 			utils.Errorf("error processing %s: %v", file, err)
 		}
 	}
 }
 
-func exportFromFile(path string, filterTags []string, writtenImports map[string]bool, out io.Writer) error {
+func exportFromFile(path string, filterTags []string, writtenImports map[string]bool, writtenRules map[string]bool, out io.Writer) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -82,6 +83,9 @@ func exportFromFile(path string, filterTags []string, writtenImports map[string]
 		if len(filterTags) > 0 && !hasMatchingTag(rule.Tags, filterTags) {
 			continue
 		}
+		if writtenRules[rule.Identifier] {
+			continue
+		}
 		// Write new imports from this file on the first matching rule.
 		if !importsWritten {
 			for _, imp := range ruleset.Imports {
@@ -95,6 +99,7 @@ func exportFromFile(path string, filterTags []string, writtenImports map[string]
 		if err := rule.WriteSource(out); err != nil {
 			utils.Errorf("failed to write rule %s: %v", rule.Identifier, err)
 		}
+		writtenRules[rule.Identifier] = true
 	}
 	return nil
 }
