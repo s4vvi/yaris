@@ -2,6 +2,7 @@ package export
 
 import (
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"slices"
@@ -56,14 +57,15 @@ func Run(args []string) {
 		utils.Fatalf("failed to walk rules path: %v", err)
 	}
 
+	writtenImports := map[string]bool{}
 	for _, file := range yaraFiles {
-		if err := exportFromFile(file, filterTags, out); err != nil {
+		if err := exportFromFile(file, filterTags, writtenImports, out); err != nil {
 			utils.Errorf("error processing %s: %v", file, err)
 		}
 	}
 }
 
-func exportFromFile(path string, filterTags []string, out io.Writer) error {
+func exportFromFile(path string, filterTags []string, writtenImports map[string]bool, out io.Writer) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -75,9 +77,20 @@ func exportFromFile(path string, filterTags []string, out io.Writer) error {
 		return err
 	}
 
+	importsWritten := false
 	for _, rule := range ruleset.Rules {
 		if len(filterTags) > 0 && !hasMatchingTag(rule.Tags, filterTags) {
 			continue
+		}
+		// Write new imports from this file on the first matching rule.
+		if !importsWritten {
+			for _, imp := range ruleset.Imports {
+				if !writtenImports[imp] {
+					fmt.Fprintf(out, "import \"%s\"\n", imp)
+					writtenImports[imp] = true
+				}
+			}
+			importsWritten = true
 		}
 		if err := rule.WriteSource(out); err != nil {
 			utils.Errorf("failed to write rule %s: %v", rule.Identifier, err)
